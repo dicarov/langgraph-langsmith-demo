@@ -1,18 +1,15 @@
 import json
 import os
-import re
 from pathlib import Path
 from typing import Dict, List
 
 from langsmith import Client
 from langsmith.evaluation import evaluate
-from openai import OpenAI
 
 from app import run_agent
 
 
 DATASET_NAME = "faq-support-agent"
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 
 DATASET_EXAMPLES = [
@@ -81,53 +78,19 @@ def run_langsmith_evaluation() -> dict:
         result = run_agent(inputs["question"])
         return {"output": result["answer"]}
 
-    def llm_judge(run, example):
-        prediction = str(run.outputs.get("output", "")).strip()
-        expected = str(example.outputs.get("answer", "")).strip()
-
-        if not os.environ.get("OPENAI_API_KEY"):
-            score = int(expected.lower() in prediction.lower() or prediction.lower() in expected.lower())
-            return {
-                "score": score,
-                "comment": "Fallback heuristic used because OPENAI_API_KEY is not set.",
-            }
-
-        try:
-            openai_client = OpenAI()
-            prompt = (
-                "You are judging a support assistant response. Compare the predicted answer "
-                "to the expected answer and decide whether the prediction is correct and helpful. "
-                "Return strict JSON with keys: score (0 or 1) and comment (short explanation).\n\n"
-                f"Expected answer: {expected}\n"
-                f"Predicted answer: {prediction}"
-            )
-            response = openai_client.responses.create(
-                model=OPENAI_MODEL,
-                input=prompt,
-                temperature=0,
-            )
-            content = getattr(response, "output_text", "") or ""
-            if not content:
-                raise ValueError("OpenAI returned no text")
-            match = re.search(r'"score"\s*:\s*(0|1)', content)
-            score = int(match.group(1)) if match else 0
-            comment = re.search(r'"comment"\s*:\s*"([^"]*)"', content)
-            comment_text = comment.group(1) if comment else "LLM judge evaluated the answer."
-            return {"score": score, "comment": comment_text}
-        except Exception as exc:
-            score = int(expected.lower() in prediction.lower() or prediction.lower() in expected.lower())
-            return {
-                "score": score,
-                "comment": f"LLM judge failed; used fallback heuristic. Error: {exc}",
-            }
+    def correctness(run, example):
+        prediction = str(run.outputs.get("output", "")).strip().lower()
+        expected = str(example.outputs.get("answer", "")).strip().lower()
+        score = int(expected in prediction or prediction in expected)
+        return {"score": score, "comment": f"Expected: {expected}"}
 
     results = evaluate(
         predict,
         data=DATASET_NAME,
-        evaluators=[llm_judge],
+        evaluators=[correctness],
         experiment_prefix="faq-support-agent",
         description="Evaluate a simple LangGraph FAQ agent with LangSmith",
-        metadata={"agent": "langgraph-faq", "workflow": "state-graph", "evaluator": "llm-judge"},
+        metadata={"agent": "langgraph-faq", "workflow": "state-graph"},
         client=client,
         blocking=True,
     )
